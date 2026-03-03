@@ -1,0 +1,210 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+
+  # ============================================================
+  # VM server-dba : PostgreSQL - IP : 192.168.56.12
+  # ============================================================
+  config.vm.define "server-dba" do |dba|
+    dba.vm.box = "ubuntu/bionic64"
+    dba.vm.hostname = "server-dba"
+    dba.vm.network "private_network", ip: "192.168.56.12"
+    dba.vm.boot_timeout = 600
+    dba.vm.provider "virtualbox" do |vb|
+      vb.name = "server-dba"
+      vb.memory = 1024
+      vb.cpus = 1
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+    end
+    dba.vm.provision "shell", inline: <<-SHELL
+      sudo apt update -y
+      sudo apt install -y postgresql postgresql-contrib
+      sudo systemctl start postgresql
+      sudo systemctl enable postgresql
+      sudo -u postgres psql -c "CREATE USER appuser WITH PASSWORD 'App@123';"
+      sudo -u postgres psql -c "CREATE DATABASE schooldb OWNER appuser;"
+      sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE schooldb TO appuser;"
+      sudo sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" /etc/postgresql/10/main/postgresql.conf
+      echo "host all all 0.0.0.0/0 md5" | sudo tee -a /etc/postgresql/10/main/pg_hba.conf
+      sudo systemctl restart postgresql@10-main
+      echo "server-dba pret ! PostgreSQL sur 192.168.56.12:5432"
+    SHELL
+  end
+
+  # ============================================================
+  # VM server-back : JDK 17 + Spring Boot - IP : 192.168.56.11
+  # ============================================================
+  config.vm.define "server-back" do |back|
+    back.vm.box = "ubuntu/bionic64"
+    back.vm.hostname = "server-back"
+    back.vm.network "private_network", ip: "192.168.56.11"
+    back.vm.network "forwarded_port", guest: 8080, host: 8083
+    back.vm.boot_timeout = 600
+    back.vm.provider "virtualbox" do |vb|
+      vb.name = "server-back"
+      vb.memory = 2048
+      vb.cpus = 2
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+    end
+    back.vm.provision "shell", inline: <<-SHELL
+      sudo apt update -y
+      sudo apt install -y openjdk-17-jdk wget git postgresql postgresql-contrib
+      sudo update-alternatives --set java /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+      export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+      echo "export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> /home/vagrant/.bashrc
+      cd /tmp
+      wget -q https://archive.apache.org/dist/maven/maven-3/3.9.4/binaries/apache-maven-3.9.4-bin.tar.gz
+      sudo tar xzf apache-maven-3.9.4-bin.tar.gz -C /opt
+      sudo ln -sf /opt/apache-maven-3.9.4 /opt/maven
+      export PATH=/opt/maven/bin:$PATH
+      echo "export PATH=/opt/maven/bin:\$PATH" >> /home/vagrant/.bashrc
+      sudo systemctl start postgresql
+      sudo -u postgres psql -c "CREATE USER appuser WITH PASSWORD 'App@123';" 2>/dev/null || true
+      sudo -u postgres psql -c "CREATE DATABASE schooldb OWNER appuser;" 2>/dev/null || true
+      sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE schooldb TO appuser;" 2>/dev/null || true
+      cd /home/vagrant
+      git clone https://github.com/NdeyeNMbaye/ExamJavaM1GL.git app
+      chown -R vagrant:vagrant /home/vagrant/app
+      APP_PROPS=$(find /home/vagrant/app -name "application.properties" | head -1)
+      cat > "$APP_PROPS" << EOF
+spring.datasource.url=jdbc:postgresql://localhost:5432/schooldb
+spring.datasource.username=appuser
+spring.datasource.password=App@123
+spring.datasource.driver-class-name=org.postgresql.Driver
+spring.jpa.database-platform=org.hibernate.dialect.PostgreSQLDialect
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+server.port=8080
+spring.web.cors.allowed-origins=*
+spring.web.cors.allowed-methods=GET,POST,PUT,DELETE,OPTIONS
+spring.web.cors.allowed-headers=*
+EOF
+      cd /home/vagrant/app
+      export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+      export PATH=/opt/maven/bin:$PATH
+      mvn clean package -DskipTests
+      JAR=$(find /home/vagrant/app/target -name "*.jar" ! -name "*original*" | head -1)
+      sudo tee /etc/systemd/system/springapp.service > /dev/null << EOF2
+[Unit]
+Description=Spring Boot Backend ISI
+After=network.target postgresql.service
+[Service]
+User=vagrant
+Environment=JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ExecStart=/usr/lib/jvm/java-17-openjdk-amd64/bin/java -jar $JAR
+SuccessExitStatus=143
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF2
+      sudo systemctl daemon-reload
+      sudo systemctl enable springapp
+      sudo systemctl start springapp
+      echo "server-back pret ! http://192.168.56.11:8080"
+    SHELL
+  end
+
+  # ============================================================
+  # VM server-front : Nginx + Angular - IP : 192.168.56.10
+  # Ubuntu 20.04 (focal) pour Node.js 18 + Angular 17
+  # ============================================================
+  config.vm.define "server-front" do |front|
+    front.vm.box = "ubuntu/focal64"
+    front.vm.hostname = "server-front"
+    front.vm.network "private_network", ip: "192.168.56.10"
+    front.vm.network "forwarded_port", guest: 80, host: 8084
+    front.vm.boot_timeout = 600
+    front.vm.provider "virtualbox" do |vb|
+      vb.name = "server-front"
+      vb.memory = 2048
+      vb.cpus = 2
+      vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+    end
+    front.vm.provision "shell", inline: <<-SHELL
+      sudo apt update -y
+      sudo apt install -y nginx git curl
+
+      # Node.js 18 — compatible Ubuntu 20.04
+      curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+      sudo apt install -y nodejs
+      node -v
+      npm -v
+
+      # Cloner le frontend
+      cd /home/vagrant
+      git clone https://github.com/NdeyeNMbaye/front-Spring.git frontend
+      chown -R vagrant:vagrant /home/vagrant/frontend
+
+      # Mettre a jour l URL API
+      ENV_FILE=$(find /home/vagrant/frontend -name "environment.ts" | head -1)
+      if [ -n "$ENV_FILE" ]; then
+        sed -i "s|apiUrl:.*|apiUrl: 'http://192.168.56.11:8080'|g" "$ENV_FILE"
+        echo "environment.ts mis a jour :"
+        cat "$ENV_FILE"
+      fi
+      ENV_PROD=$(find /home/vagrant/frontend -name "environment.prod.ts" | head -1)
+      if [ -n "$ENV_PROD" ]; then
+        sed -i "s|apiUrl:.*|apiUrl: 'http://192.168.56.11:8080'|g" "$ENV_PROD"
+      fi
+
+      # Build Angular depuis le bon dossier
+      cd /home/vagrant/frontend/frontend-angular
+      npm install
+      npm run build
+      echo "Build Angular : $?"
+
+      # Copier vers nginx
+      sudo rm -rf /var/www/html/*
+      DIST=$(find /home/vagrant/frontend/frontend-angular/dist -name "index.html" 2>/dev/null | head -1 | xargs -I{} dirname {})
+      echo "Dossier dist : $DIST"
+      if [ -n "$DIST" ]; then
+        sudo cp -r "$DIST"/. /var/www/html/
+      fi
+      echo "Fichiers dans /var/www/html/ :"
+      ls /var/www/html/
+
+      # Configuration Nginx
+      sudo tee /etc/nginx/sites-available/default > /dev/null << 'NGINXEOF'
+server {
+    listen 80 default_server;
+    root /var/www/html;
+    index index.html;
+    server_name _;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /sectors {
+        proxy_pass http://192.168.56.11:8080/sectors;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        add_header Access-Control-Allow-Origin "*";
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS";
+        add_header Access-Control-Allow-Headers "Content-Type";
+    }
+
+    location /classes {
+        proxy_pass http://192.168.56.11:8080/classes;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        add_header Access-Control-Allow-Origin "*";
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS";
+        add_header Access-Control-Allow-Headers "Content-Type";
+    }
+}
+NGINXEOF
+
+      sudo nginx -t && sudo systemctl restart nginx
+      sudo systemctl enable nginx
+      echo "========================================"
+      echo " server-front pret !"
+      echo " Frontend : http://192.168.56.10"
+      echo " Windows  : http://localhost:8084"
+      echo "========================================"
+    SHELL
+  end
+
+end
