@@ -35,7 +35,7 @@ cd TP3_DevopsMNS
 ## 2. Démarrer toutes les VMs
    vagrant up
 
-⚠️ Le premier démarrage peut prendre 10-15 minutes.
+Le premier démarrage peut prendre des minutes.
 ## Démarrage des VMs
 <img width="1275" height="801" alt="image" src="https://github.com/user-attachments/assets/1e3b9f4d-6d1c-41d6-b7b6-16b0c5fb3800" />
 <img width="836" height="266" alt="image" src="https://github.com/user-attachments/assets/c89d5faf-a39f-4858-975a-5a333eab47c1" />
